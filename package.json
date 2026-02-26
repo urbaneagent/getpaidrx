@@ -1,0 +1,27 @@
+{
+  "name": "getpaidrx",
+  "version": "0.1.0",
+  "description": "Pharmacy Cost Savings Platform - Underpayment detection, patient price comparison",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "server": "tsx src/server/index.ts"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "tesseract.js": "^5.0.4"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/express": "^4.17.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "tsx": "^4.7.0"
+  }
+}
