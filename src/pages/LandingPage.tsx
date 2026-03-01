@@ -13,6 +13,7 @@ import {
   Users,
   TrendingUp,
   Scale,
+  Upload,
 } from 'lucide-react';
 
 export default function LandingPage() {
