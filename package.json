@@ -6,7 +6,7 @@
   "description": "Pharmacy Underpayment Recovery & Drug Price Comparison Platform",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && npm run build:server",
+    "build": "npx vite build && npm run build:server",
     "build:server": "node build-server.js",
     "preview": "vite preview",
     "server": "tsx src/server/index.ts",
