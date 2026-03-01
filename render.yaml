@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: getpaidrx
+    runtime: node
+    region: ohio
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: node dist-server/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001

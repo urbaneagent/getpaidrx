@@ -1,0 +1,21 @@
+claimId,ndc,drugName,quantity,dateDispensed,reimbursement,payer
+CLM-001,00002-4462-30,Metformin 500mg,90,2026-01-15,0.85,Cigna
+CLM-002,00071-0155-23,Lisinopril 10mg,30,2026-01-15,0.52,UnitedHealth
+CLM-003,00093-7180-01,Amlodipine 5mg,30,2026-01-16,0.89,Cigna
+CLM-004,00378-1800-01,Atorvastatin 20mg,90,2026-01-16,1.50,Aetna
+CLM-005,00781-1506-01,Omeprazole 20mg,30,2026-01-17,0.25,UnitedHealth
+CLM-006,51991-0747-01,Levothyroxine 50mcg,30,2026-01-17,0.45,Cigna
+CLM-007,00591-0405-01,Gabapentin 300mg,90,2026-01-18,3.20,Aetna
+CLM-008,65862-0157-01,Sertraline 50mg,30,2026-01-18,0.98,UnitedHealth
+CLM-009,00378-3512-01,Losartan 50mg,90,2026-01-19,4.50,Cigna
+CLM-010,00093-0058-01,Simvastatin 20mg,30,2026-01-19,0.75,Aetna
+CLM-011,68382-0052-10,Montelukast 10mg,30,2026-01-20,1.80,UnitedHealth
+CLM-012,65862-0676-01,Escitalopram 10mg,30,2026-01-20,0.85,Cigna
+CLM-013,00781-2061-01,Pantoprazole 40mg,90,2026-01-21,1.90,Aetna
+CLM-014,42571-0312-10,Clopidogrel 75mg,30,2026-01-21,0.30,UnitedHealth
+CLM-015,00093-5264-01,Duloxetine 30mg,60,2026-01-22,2.20,Cigna
+CLM-016,68180-0757-01,Rosuvastatin 10mg,30,2026-01-22,0.52,Aetna
+CLM-017,00378-6150-01,Tamsulosin 0.4mg,30,2026-01-23,0.35,UnitedHealth
+CLM-018,00591-3533-01,Meloxicam 15mg,30,2026-01-23,1.02,Cigna
+CLM-019,00093-2263-01,Pregabalin 75mg,60,2026-01-24,3.15,Aetna
+CLM-020,00093-3147-01,Amoxicillin 500mg,21,2026-01-24,0.56,UnitedHealth
