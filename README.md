@@ -17,6 +17,12 @@ The compliance verification layer for the new PBM transparency rules (Consolidat
 - **Prescription OCR** — Upload a prescription photo for auto-fill (coming soon)
 - **Coupon Finder** — Find GoodRx, SingleCare, and other discount codes
 
+### Live NADAC API Integration
+- **Drug Search** — `GET /api/nadac/search?q=metformin` — queries CMS's live NADAC database (1.8M+ records)
+- **NDC Lookup** — `GET /api/nadac/search?ndc=00002446230` — lookup specific NDC codes
+- **Rate Check** — `POST /api/nadac/check` — compare actual reimbursement against current NADAC rate
+- **Fallback** — automatically falls back to local database if CMS API is unavailable
+
 ## Tech Stack
 
 - **Frontend:** React 18, TypeScript, Vite, Tailwind CSS
