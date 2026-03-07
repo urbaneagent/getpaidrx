@@ -325,6 +325,100 @@ app.post('/api/nadac/check', async (req, res) => {
   }
 });
 
+// ---- Appeal Letter Generator ----
+app.post('/api/appeal', (req, res) => {
+  const { claim, pharmacyInfo } = req.body;
+
+  if (!claim || !claim.ndc || !claim.reimbursement) {
+    res.status(400).json({ error: 'Required: claim object with ndc, reimbursement, and quantity' });
+    return;
+  }
+
+  const pharmacy = pharmacyInfo || {
+    name: '[Pharmacy Name]',
+    npi: '[NPI Number]',
+    address: '[Address]',
+    phone: '[Phone]',
+    contact: '[Pharmacist Name]',
+  };
+
+  const nadacData = NADAC_DATABASE[claim.ndc];
+  const drugName = claim.drugName || nadacData?.drugName || '[Drug Name]';
+  const nadacRate = claim.nadacPerUnit || nadacData?.nadacPerUnit || 0;
+  const quantity = claim.quantity || 1;
+  const expectedReimbursement = nadacRate * quantity;
+  const underpayment = expectedReimbursement - claim.reimbursement;
+  const today = new Date().toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+
+  const letter = `${today}
+
+${pharmacy.name}
+${pharmacy.address}
+NPI: ${pharmacy.npi}
+Phone: ${pharmacy.phone}
+
+To: ${claim.payerName || '[PBM/Payer Name]'}
+    Claims Department
+
+RE: Formal Appeal – Underpayment on Prescription Claim
+    Rx Number: ${claim.rxNumber || '[Rx Number]'}
+    Patient: ${claim.patientName || '[Patient Name]'}
+    Date of Service: ${claim.dateOfService || '[Date of Service]'}
+    NDC: ${claim.ndc}
+    Drug: ${drugName}
+
+Dear Claims Review Department,
+
+We are writing to formally appeal the underpayment of the above-referenced claim for the following prescription:
+
+  Drug: ${drugName}
+  NDC: ${claim.ndc}
+  Quantity Dispensed: ${quantity}
+  Days Supply: ${claim.daysSupply || 30}
+
+REIMBURSEMENT ANALYSIS:
+  NADAC Per Unit: $${nadacRate.toFixed(4)}
+  Expected Reimbursement (${quantity} units × $${nadacRate.toFixed(4)}): $${expectedReimbursement.toFixed(2)}
+  Actual Reimbursement Received: $${claim.reimbursement.toFixed(2)}
+  Underpayment Amount: $${underpayment.toFixed(2)}
+
+The National Average Drug Acquisition Cost (NADAC), as published by the Centers for Medicare & Medicaid Services (CMS), represents the benchmark acquisition cost for this medication. The reimbursement received for this claim falls ${((underpayment / expectedReimbursement) * 100).toFixed(1)}% below the NADAC rate, which does not adequately cover the cost of acquiring and dispensing this medication.
+
+Per the Consolidated Appropriations Act of 2026, PBMs are required to provide transparency in reimbursement calculations. The underpayment identified in this claim falls below the CMS NADAC benchmark, which serves as the recognized industry standard for drug acquisition costs.
+
+We respectfully request:
+1. Immediate review and adjustment of this claim to reflect the current NADAC rate
+2. Retroactive reimbursement of the underpayment amount ($${underpayment.toFixed(2)})
+3. Written explanation of the reimbursement methodology used for this claim
+
+Please respond within 30 days of receipt of this appeal. If you have any questions, please contact ${pharmacy.contact || '[Pharmacist Name]'} at ${pharmacy.phone}.
+
+Sincerely,
+
+${pharmacy.contact || '[Pharmacist Name]'}, PharmD
+${pharmacy.name}
+
+Enclosures:
+- NADAC Reference Data (CMS data.medicaid.gov)
+- Original Claim Submission
+- Remittance Advice`;
+
+  res.json({
+    letter,
+    summary: {
+      drug: drugName,
+      ndc: claim.ndc,
+      underpaymentAmount: +underpayment.toFixed(2),
+      nadacRate,
+      actualReimbursement: claim.reimbursement,
+      expectedReimbursement: +expectedReimbursement.toFixed(2),
+    },
+    generatedAt: new Date().toISOString(),
+  });
+});
+
 // Price comparison (demo endpoint)
 app.post('/api/compare', (req, res) => {
   const { drugName, strength, quantity = 30, zipCode } = req.body;
