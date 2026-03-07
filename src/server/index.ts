@@ -128,6 +128,203 @@ app.post('/api/analyze', (req, res) => {
   });
 });
 
+// ---- Live NADAC Search (CMS data.medicaid.gov API) ----
+// Dataset IDs for CMS NADAC data
+const NADAC_DATASET_IDS: Record<string, string> = {
+  '2026': 'fbb83258-11c7-47f5-8b18-5f8e79f7e704',
+  '2025': 'f38d0706-1239-442c-a3cc-40ef1b686ac0',
+};
+
+// Search NADAC by drug name or NDC via CMS live API
+app.get('/api/nadac/search', async (req, res) => {
+  const { q, ndc, year = '2026', limit = '20' } = req.query;
+
+  if (!q && !ndc) {
+    res.status(400).json({ error: 'Provide either q (drug name search) or ndc (NDC lookup)' });
+    return;
+  }
+
+  const datasetId = NADAC_DATASET_IDS[year as string] || NADAC_DATASET_IDS['2026'];
+  const apiUrl = `https://data.medicaid.gov/api/1/datastore/query/${datasetId}/0`;
+  const queryLimit = Math.min(parseInt(limit as string) || 20, 100);
+
+  try {
+    const params: Record<string, string> = {
+      limit: String(queryLimit),
+      'sort[0][property]': 'ndc_description',
+      'sort[0][order]': 'asc',
+    };
+
+    if (ndc && typeof ndc === 'string') {
+      // Exact NDC lookup (strip dashes for comparison)
+      const cleanNdc = ndc.replace(/-/g, '');
+      params['conditions[0][property]'] = 'ndc';
+      params['conditions[0][value]'] = cleanNdc;
+      params['conditions[0][operator]'] = '=';
+    } else if (q && typeof q === 'string') {
+      // Drug name search (LIKE with wildcards)
+      params['conditions[0][property]'] = 'ndc_description';
+      params['conditions[0][value]'] = `%${q.toUpperCase()}%`;
+      params['conditions[0][operator]'] = 'LIKE';
+    }
+
+    const urlParams = new URLSearchParams(params);
+    const response = await fetch(`${apiUrl}?${urlParams}`);
+
+    if (!response.ok) {
+      throw new Error(`CMS API returned ${response.status}`);
+    }
+
+    const data = await response.json() as {
+      results: Array<{
+        ndc_description: string;
+        ndc: string;
+        nadac_per_unit: string;
+        effective_date: string;
+        pricing_unit: string;
+        pharmacy_type_indicator: string;
+        otc: string;
+        classification_for_rate_setting: string;
+        as_of_date: string;
+      }>;
+      count: number;
+    };
+
+    const drugs = data.results.map((r) => ({
+      ndc: r.ndc,
+      ndcFormatted: r.ndc.length === 11
+        ? `${r.ndc.slice(0, 5)}-${r.ndc.slice(5, 9)}-${r.ndc.slice(9)}`
+        : r.ndc,
+      drugName: r.ndc_description,
+      nadacPerUnit: parseFloat(r.nadac_per_unit),
+      effectiveDate: r.effective_date,
+      pricingUnit: r.pricing_unit,
+      pharmacyType: r.pharmacy_type_indicator,
+      otc: r.otc === 'Y',
+      classification: r.classification_for_rate_setting === 'G' ? 'Generic' : 'Brand',
+      asOfDate: r.as_of_date,
+    }));
+
+    res.json({
+      query: q || ndc,
+      year,
+      count: drugs.length,
+      totalMatches: data.count,
+      source: 'CMS data.medicaid.gov (live)',
+      drugs,
+    });
+  } catch (err: any) {
+    console.error('NADAC API error:', err.message);
+
+    // Fallback to local database for drug name search
+    if (q && typeof q === 'string') {
+      const searchTerm = q.toLowerCase();
+      const localMatches = Object.entries(NADAC_DATABASE)
+        .filter(([_, data]) => data.drugName.toLowerCase().includes(searchTerm))
+        .map(([ndc, data]) => ({ ndc, ...data }));
+
+      res.json({
+        query: q,
+        year,
+        count: localMatches.length,
+        totalMatches: localMatches.length,
+        source: 'local (CMS API unavailable)',
+        drugs: localMatches,
+      });
+    } else {
+      res.status(502).json({
+        error: 'CMS NADAC API unavailable',
+        details: err.message,
+      });
+    }
+  }
+});
+
+// NADAC rate check — compare a reimbursement against live CMS NADAC rate
+app.post('/api/nadac/check', async (req, res) => {
+  const { ndc, quantity, reimbursement } = req.body;
+
+  if (!ndc || !quantity || reimbursement === undefined) {
+    res.status(400).json({ error: 'Required: ndc, quantity, reimbursement' });
+    return;
+  }
+
+  const cleanNdc = ndc.replace(/-/g, '');
+  const datasetId = NADAC_DATASET_IDS['2026'];
+  const apiUrl = `https://data.medicaid.gov/api/1/datastore/query/${datasetId}/0`;
+
+  try {
+    const params = new URLSearchParams({
+      limit: '1',
+      'conditions[0][property]': 'ndc',
+      'conditions[0][value]': cleanNdc,
+      'conditions[0][operator]': '=',
+      'sort[0][property]': 'effective_date',
+      'sort[0][order]': 'desc',
+    });
+
+    const response = await fetch(`${apiUrl}?${params}`);
+    if (!response.ok) throw new Error(`CMS API returned ${response.status}`);
+
+    const data = await response.json() as {
+      results: Array<{
+        ndc_description: string;
+        ndc: string;
+        nadac_per_unit: string;
+        effective_date: string;
+        pricing_unit: string;
+      }>;
+    };
+
+    if (data.results.length === 0) {
+      // Fallback to local
+      const localDrug = NADAC_DATABASE[ndc];
+      if (!localDrug) {
+        res.status(404).json({ error: `No NADAC data found for NDC ${ndc}` });
+        return;
+      }
+      const expected = localDrug.nadacPerUnit * quantity;
+      const diff = reimbursement - expected;
+      res.json({
+        ndc,
+        drugName: localDrug.drugName,
+        nadacPerUnit: localDrug.nadacPerUnit,
+        quantity,
+        expectedReimbursement: +expected.toFixed(2),
+        actualReimbursement: reimbursement,
+        difference: +diff.toFixed(2),
+        isUnderpaid: diff < -expected * 0.1,
+        underpaymentPercent: expected > 0 ? +((diff / expected) * 100).toFixed(1) : 0,
+        source: 'local',
+      });
+      return;
+    }
+
+    const drug = data.results[0];
+    const nadacRate = parseFloat(drug.nadac_per_unit);
+    const expected = nadacRate * quantity;
+    const diff = reimbursement - expected;
+
+    res.json({
+      ndc: drug.ndc,
+      drugName: drug.ndc_description,
+      nadacPerUnit: nadacRate,
+      effectiveDate: drug.effective_date,
+      pricingUnit: drug.pricing_unit,
+      quantity,
+      expectedReimbursement: +expected.toFixed(2),
+      actualReimbursement: reimbursement,
+      difference: +diff.toFixed(2),
+      isUnderpaid: diff < -expected * 0.1,
+      underpaymentPercent: expected > 0 ? +((diff / expected) * 100).toFixed(1) : 0,
+      source: 'CMS data.medicaid.gov (live)',
+    });
+  } catch (err: any) {
+    console.error('NADAC check error:', err.message);
+    res.status(502).json({ error: 'CMS NADAC API unavailable', details: err.message });
+  }
+});
+
 // Price comparison (demo endpoint)
 app.post('/api/compare', (req, res) => {
   const { drugName, strength, quantity = 30, zipCode } = req.body;
