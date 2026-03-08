@@ -467,6 +467,184 @@ Enclosures:
   });
 });
 
+// ---- CMS Complaint Report Generator ----
+app.post('/api/cms-complaint', (req, res) => {
+  const { claims, pharmacyInfo } = req.body;
+
+  if (!claims || !Array.isArray(claims) || claims.length === 0) {
+    res.status(400).json({ error: 'Request body must include a "claims" array with at least one underpaid claim' });
+    return;
+  }
+
+  const pharmacy = pharmacyInfo || {
+    name: '[Pharmacy Name]',
+    npi: '[NPI Number]',
+    address: '[Address]',
+    phone: '[Phone]',
+    contactName: '[Pharmacist Name]',
+    ncpdpId: '[NCPDP ID]',
+  };
+
+  const today = new Date().toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+
+  // Calculate summary statistics
+  const totalUnderpayment = claims.reduce((sum: number, c: any) => sum + (c.underpaymentAmount || 0), 0);
+  const totalClaims = claims.length;
+  const payerBreakdown: Record<string, { count: number; totalAmount: number }> = {};
+
+  claims.forEach((claim: any) => {
+    const payer = claim.payerName || claim.payer || 'Unknown Payer';
+    if (!payerBreakdown[payer]) {
+      payerBreakdown[payer] = { count: 0, totalAmount: 0 };
+    }
+    payerBreakdown[payer].count += 1;
+    payerBreakdown[payer].totalAmount += claim.underpaymentAmount || 0;
+  });
+
+  // Generate claim details table
+  const claimDetails = claims
+    .map((claim: any, index: number) => {
+      const nadacData = NADAC_DATABASE[claim.ndc];
+      const drugName = claim.drugName || claim.nadacDrugName || nadacData?.drugName || '[Drug Name]';
+      const nadacRate = claim.nadacPerUnit || nadacData?.nadacPerUnit || 0;
+      const expected = claim.expectedReimbursement || (nadacRate * (claim.quantity || 1));
+      const underpayment = claim.underpaymentAmount || 0;
+      const underpaymentPercent = expected > 0 ? ((underpayment / expected) * 100).toFixed(1) : '0.0';
+
+      return `
+  ${index + 1}. Drug: ${drugName}
+     NDC: ${claim.ndc}
+     Quantity: ${claim.quantity || 'N/A'}
+     Date of Service: ${claim.dateOfService || 'N/A'}
+     Payer: ${claim.payerName || claim.payer || 'N/A'}
+     NADAC Per Unit: $${nadacRate.toFixed(4)}
+     Expected Reimbursement: $${expected.toFixed(2)}
+     Actual Reimbursement: $${(claim.reimbursement || 0).toFixed(2)}
+     Underpayment Amount: $${underpayment.toFixed(2)} (${underpaymentPercent}% below NADAC)`;
+    })
+    .join('\n');
+
+  // Generate payer breakdown
+  const payerSummary = Object.entries(payerBreakdown)
+    .map(([payer, data]) => `  - ${payer}: ${data.count} claim(s), $${data.totalAmount.toFixed(2)} total underpayment`)
+    .join('\n');
+
+  const report = `CMS COMPLAINT REPORT
+PBM Contract Violation – Systematic Underpayment Below NADAC Benchmark
+
+Submitted: ${today}
+
+═══════════════════════════════════════════════════════════════════════
+
+PHARMACY INFORMATION
+
+Name: ${pharmacy.name}
+NPI: ${pharmacy.npi}
+NCPDP ID: ${pharmacy.ncpdpId}
+Address: ${pharmacy.address}
+Contact: ${pharmacy.contactName}
+Phone: ${pharmacy.phone}
+
+═══════════════════════════════════════════════════════════════════════
+
+COMPLAINT SUMMARY
+
+This complaint is filed pursuant to the Consolidated Appropriations Act of 2026,
+which mandates PBM transparency and prohibits reimbursement practices that fall
+systematically below the CMS National Average Drug Acquisition Cost (NADAC) benchmark.
+
+Total Claims with Identified Underpayment: ${totalClaims}
+Total Underpayment Amount: $${totalUnderpayment.toFixed(2)}
+Average Underpayment per Claim: $${(totalUnderpayment / totalClaims).toFixed(2)}
+
+═══════════════════════════════════════════════════════════════════════
+
+PAYER BREAKDOWN
+
+${payerSummary}
+
+═══════════════════════════════════════════════════════════════════════
+
+DETAILED CLAIM ANALYSIS
+${claimDetails}
+
+═══════════════════════════════════════════════════════════════════════
+
+LEGAL BASIS
+
+The Consolidated Appropriations Act of 2026 requires PBMs to:
+1. Provide transparent reimbursement methodologies
+2. Reimburse at rates that reasonably reflect drug acquisition costs
+3. Not engage in systematic underpayment practices
+
+The claims identified above demonstrate a pattern of reimbursement that falls
+substantially below the CMS NADAC benchmark, which represents the nationally
+recognized standard for drug acquisition costs.
+
+═══════════════════════════════════════════════════════════════════════
+
+REQUESTED ACTION
+
+We respectfully request that CMS:
+1. Investigate the reimbursement practices of the identified PBM(s)
+2. Require corrective action to bring reimbursement in line with NADAC benchmarks
+3. Order retroactive payment of the underpayment amounts documented above
+4. Monitor future reimbursement to ensure compliance
+
+═══════════════════════════════════════════════════════════════════════
+
+DOCUMENTATION
+
+Enclosed:
+- NADAC reference data from CMS data.medicaid.gov
+- Remittance advices for all claims listed
+- Pharmacy purchase invoices demonstrating actual acquisition costs
+- Correspondence with PBM(s) regarding reimbursement concerns
+
+═══════════════════════════════════════════════════════════════════════
+
+CERTIFICATION
+
+I certify under penalty of perjury that the information provided in this complaint
+is true and accurate to the best of my knowledge.
+
+Signature: _____________________________
+Name: ${pharmacy.contactName}
+Title: Pharmacist-in-Charge
+Date: ${today}
+
+═══════════════════════════════════════════════════════════════════════
+
+SUBMISSION INSTRUCTIONS
+
+Submit this complaint to CMS via:
+- Email: PBMCompliance@cms.hhs.gov
+- Online Portal: https://www.cms.gov/medicare/prescription-drug-coverage/pbm-transparency
+- Mail: Centers for Medicare & Medicaid Services
+        PBM Transparency Division
+        7500 Security Boulevard
+        Baltimore, MD 21244
+
+For questions, call the CMS PBM Hotline: 1-800-MEDICARE (1-800-633-4227)
+
+═══════════════════════════════════════════════════════════════════════`;
+
+  res.json({
+    report,
+    summary: {
+      totalClaims,
+      totalUnderpayment: +totalUnderpayment.toFixed(2),
+      averageUnderpayment: +(totalUnderpayment / totalClaims).toFixed(2),
+      payerBreakdown,
+      pharmacyName: pharmacy.name,
+      submissionDate: today,
+    },
+    generatedAt: new Date().toISOString(),
+  });
+});
+
 // Price comparison (demo endpoint)
 app.post('/api/compare', (req, res) => {
   const { drugName, strength, quantity = 30, zipCode } = req.body;
@@ -574,11 +752,18 @@ app.post('/api/validate-csv', (req, res) => {
       errors: missing.map(col => ({
         row: 0,
         field: col,
-        message: `Required column "${col}" not found. Expected one of: ${COLUMN_ALIASES[col].join(', ')}`,
+        message: `Required column "${col}" not found. Expected one of: ${COLUMN_ALIASES[col].join(', ')}. Example: rename your column to "${COLUMN_ALIASES[col][0]}"`,
         value: '',
+        suggestion: `Add a column header named "${COLUMN_ALIASES[col][0]}" to your CSV`,
       })),
       warnings: [],
-      columnMapping: { detected, expected, missing },
+      columnMapping: {
+        detected,
+        expected,
+        missing,
+        yourHeaders: headers,
+        example: `Expected CSV format:\nndc,quantity,reimbursement,drug_name,payer\n00002-4462-30,90,2.50,Metformin,Blue Cross`
+      },
     });
     return;
   }
@@ -594,10 +779,22 @@ app.post('/api/validate-csv', (req, res) => {
     const ndcIdx = columnMap['ndc'];
     const ndcVal = values[ndcIdx] || '';
     if (!ndcVal) {
-      errors.push({ row: i, field: 'ndc', message: 'NDC is empty', value: ndcVal });
+      errors.push({
+        row: i,
+        field: 'ndc',
+        message: 'NDC is empty',
+        value: ndcVal,
+        suggestion: 'Enter the NDC code for this drug (e.g., 00002-4462-30)'
+      });
       rowValid = false;
     } else if (!validateNdcFormat(ndcVal)) {
-      errors.push({ row: i, field: 'ndc', message: 'Invalid NDC format. Expected ##-####-## or #####-####-## or 11 digits', value: ndcVal });
+      errors.push({
+        row: i,
+        field: 'ndc',
+        message: 'Invalid NDC format. Expected formats: 00002-4462-30 (with dashes) or 00002446230 (11 digits without dashes)',
+        value: ndcVal,
+        suggestion: `Check if "${ndcVal}" is a valid NDC. It should be 11 digits, optionally formatted with dashes`
+      });
       rowValid = false;
     }
 
@@ -606,10 +803,22 @@ app.post('/api/validate-csv', (req, res) => {
     const qtyVal = values[qtyIdx] || '';
     const qtyNum = parseFloat(qtyVal);
     if (!qtyVal) {
-      errors.push({ row: i, field: 'quantity', message: 'Quantity is empty', value: qtyVal });
+      errors.push({
+        row: i,
+        field: 'quantity',
+        message: 'Quantity is empty',
+        value: qtyVal,
+        suggestion: 'Enter the quantity dispensed (e.g., 30, 90)'
+      });
       rowValid = false;
     } else if (isNaN(qtyNum) || qtyNum <= 0) {
-      errors.push({ row: i, field: 'quantity', message: 'Quantity must be a positive number', value: qtyVal });
+      errors.push({
+        row: i,
+        field: 'quantity',
+        message: `Quantity must be a positive number (got "${qtyVal}")`,
+        value: qtyVal,
+        suggestion: 'Enter a valid number greater than 0'
+      });
       rowValid = false;
     }
 
@@ -618,10 +827,22 @@ app.post('/api/validate-csv', (req, res) => {
     const reimbVal = (values[reimbIdx] || '').replace(/^\$/, '');
     const reimbNum = parseFloat(reimbVal);
     if (!values[reimbIdx]) {
-      errors.push({ row: i, field: 'reimbursement', message: 'Reimbursement is empty', value: values[reimbIdx] || '' });
+      errors.push({
+        row: i,
+        field: 'reimbursement',
+        message: 'Reimbursement is empty',
+        value: values[reimbIdx] || '',
+        suggestion: 'Enter the reimbursement amount (e.g., 2.50 or $2.50)'
+      });
       rowValid = false;
     } else if (isNaN(reimbNum) || reimbNum <= 0) {
-      errors.push({ row: i, field: 'reimbursement', message: 'Reimbursement must be a positive number', value: values[reimbIdx] });
+      errors.push({
+        row: i,
+        field: 'reimbursement',
+        message: `Reimbursement must be a positive number (got "${values[reimbIdx]}")`,
+        value: values[reimbIdx],
+        suggestion: 'Enter a valid dollar amount (e.g., 2.50 or $2.50)'
+      });
       rowValid = false;
     }
 
