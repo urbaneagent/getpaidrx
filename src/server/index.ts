@@ -56,6 +56,27 @@ const NADAC_DATABASE: Record<string, { drugName: string; nadacPerUnit: number; u
   '00591-0389-01': { drugName: 'Tramadol HCl 50mg', nadacPerUnit: 0.0912, unitType: 'TAB', effectiveDate: '2026-01-15' },
 };
 
+// ---- Metrics Store (in-memory) ----
+interface MetricsState {
+  totalClaimsAnalyzed: number;
+  totalUnderpaid: number;
+  totalRecoveryAmount: number;
+  appealsGenerated: number;
+  drugUnderpayments: Record<string, { drugName: string; totalAmount: number; count: number }>;
+  payerUnderpayments: Record<string, { totalAmount: number; count: number }>;
+  lastUpdated: string;
+}
+
+const metricsStore: MetricsState = {
+  totalClaimsAnalyzed: 0,
+  totalUnderpaid: 0,
+  totalRecoveryAmount: 0,
+  appealsGenerated: 0,
+  drugUnderpayments: {},
+  payerUnderpayments: {},
+  lastUpdated: new Date().toISOString(),
+};
+
 // ---- API Routes ----
 
 // Health check
@@ -119,6 +140,29 @@ app.post('/api/analyze', (req, res) => {
 
   const underpaid = analyzed.filter((c: any) => c.isUnderpaid);
   const totalUnderpayment = underpaid.reduce((sum: number, c: any) => sum + c.underpaymentAmount, 0);
+
+  // Update metrics store
+  metricsStore.totalClaimsAnalyzed += analyzed.length;
+  metricsStore.totalUnderpaid += underpaid.length;
+  metricsStore.totalRecoveryAmount += +totalUnderpayment.toFixed(2);
+  metricsStore.lastUpdated = new Date().toISOString();
+
+  for (const claim of underpaid) {
+    const drugKey = claim.ndc || 'unknown';
+    const drugName = claim.nadacDrugName || claim.drugName || 'Unknown Drug';
+    if (!metricsStore.drugUnderpayments[drugKey]) {
+      metricsStore.drugUnderpayments[drugKey] = { drugName, totalAmount: 0, count: 0 };
+    }
+    metricsStore.drugUnderpayments[drugKey].totalAmount += claim.underpaymentAmount;
+    metricsStore.drugUnderpayments[drugKey].count += 1;
+
+    const payer = claim.payerName || claim.payer || 'Unknown Payer';
+    if (!metricsStore.payerUnderpayments[payer]) {
+      metricsStore.payerUnderpayments[payer] = { totalAmount: 0, count: 0 };
+    }
+    metricsStore.payerUnderpayments[payer].totalAmount += claim.underpaymentAmount;
+    metricsStore.payerUnderpayments[payer].count += 1;
+  }
 
   res.json({
     totalClaims: analyzed.length,
@@ -405,6 +449,10 @@ Enclosures:
 - Original Claim Submission
 - Remittance Advice`;
 
+  // Track appeal generation in metrics
+  metricsStore.appealsGenerated += 1;
+  metricsStore.lastUpdated = new Date().toISOString();
+
   res.json({
     letter,
     summary: {
@@ -452,6 +500,195 @@ app.post('/api/compare', (req, res) => {
   });
 });
 
+// ---- CSV Validation ----
+const COLUMN_ALIASES: Record<string, string[]> = {
+  ndc: ['ndc', 'ndc_code', 'ndc_number', 'ndccode', 'national_drug_code'],
+  quantity: ['quantity', 'qty', 'units', 'count', 'quantity_dispensed', 'qty_dispensed'],
+  reimbursement: ['reimbursement', 'reimb', 'amount', 'paid', 'paid_amount', 'reimbursement_amount', 'payment', 'amt'],
+  drugName: ['drugname', 'drug_name', 'drug', 'medication', 'med', 'medicine', 'ndc_description', 'description', 'desc'],
+  payer: ['payer', 'payer_name', 'payername', 'pbm', 'insurance', 'plan', 'plan_name'],
+  dateOfService: ['date', 'date_of_service', 'dos', 'service_date', 'fill_date', 'dispensed_date'],
+};
+
+const REQUIRED_COLUMNS = ['ndc', 'quantity', 'reimbursement'];
+
+function resolveColumnName(header: string): string | null {
+  const normalized = header.toLowerCase().trim().replace(/[\s-]+/g, '_');
+  for (const [canonical, aliases] of Object.entries(COLUMN_ALIASES)) {
+    if (aliases.includes(normalized)) return canonical;
+  }
+  return null;
+}
+
+function validateNdcFormat(value: string): boolean {
+  // Accept ##-####-## format or 11-digit numeric
+  return /^\d{2}-\d{4}-\d{2}$/.test(value) || /^\d{5}-\d{4}-\d{2}$/.test(value) || /^\d{11}$/.test(value);
+}
+
+app.post('/api/validate-csv', (req, res) => {
+  const { csv } = req.body;
+
+  if (!csv || typeof csv !== 'string') {
+    res.status(400).json({ error: 'Request body must include a "csv" string' });
+    return;
+  }
+
+  const lines = csv.trim().split('\n');
+  if (lines.length < 2) {
+    res.status(400).json({
+      valid: false,
+      totalRows: 0,
+      validRows: 0,
+      errors: [{ row: 0, field: 'header', message: 'CSV must have a header row and at least one data row', value: '' }],
+      warnings: [],
+      columnMapping: { detected: [], expected: REQUIRED_COLUMNS, missing: REQUIRED_COLUMNS },
+    });
+    return;
+  }
+
+  // Parse header
+  const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+  const columnMap: Record<string, number> = {};
+  const detected: string[] = [];
+  const expected = REQUIRED_COLUMNS;
+
+  headers.forEach((header, index) => {
+    const resolved = resolveColumnName(header);
+    if (resolved) {
+      columnMap[resolved] = index;
+      detected.push(resolved);
+    }
+  });
+
+  const missing = expected.filter(col => !(col in columnMap));
+
+  const errors: Array<{ row: number; field: string; message: string; value: string }> = [];
+  const warnings: Array<{ row: number; field: string; message: string }> = [];
+
+  // If required columns are missing, report it
+  if (missing.length > 0) {
+    res.json({
+      valid: false,
+      totalRows: lines.length - 1,
+      validRows: 0,
+      errors: missing.map(col => ({
+        row: 0,
+        field: col,
+        message: `Required column "${col}" not found. Expected one of: ${COLUMN_ALIASES[col].join(', ')}`,
+        value: '',
+      })),
+      warnings: [],
+      columnMapping: { detected, expected, missing },
+    });
+    return;
+  }
+
+  let validRows = 0;
+  const totalRows = lines.length - 1;
+
+  for (let i = 1; i < lines.length; i++) {
+    const values = lines[i].split(',').map(v => v.trim().replace(/^["']|["']$/g, ''));
+    let rowValid = true;
+
+    // Validate NDC
+    const ndcIdx = columnMap['ndc'];
+    const ndcVal = values[ndcIdx] || '';
+    if (!ndcVal) {
+      errors.push({ row: i, field: 'ndc', message: 'NDC is empty', value: ndcVal });
+      rowValid = false;
+    } else if (!validateNdcFormat(ndcVal)) {
+      errors.push({ row: i, field: 'ndc', message: 'Invalid NDC format. Expected ##-####-## or #####-####-## or 11 digits', value: ndcVal });
+      rowValid = false;
+    }
+
+    // Validate quantity
+    const qtyIdx = columnMap['quantity'];
+    const qtyVal = values[qtyIdx] || '';
+    const qtyNum = parseFloat(qtyVal);
+    if (!qtyVal) {
+      errors.push({ row: i, field: 'quantity', message: 'Quantity is empty', value: qtyVal });
+      rowValid = false;
+    } else if (isNaN(qtyNum) || qtyNum <= 0) {
+      errors.push({ row: i, field: 'quantity', message: 'Quantity must be a positive number', value: qtyVal });
+      rowValid = false;
+    }
+
+    // Validate reimbursement
+    const reimbIdx = columnMap['reimbursement'];
+    const reimbVal = (values[reimbIdx] || '').replace(/^\$/, '');
+    const reimbNum = parseFloat(reimbVal);
+    if (!values[reimbIdx]) {
+      errors.push({ row: i, field: 'reimbursement', message: 'Reimbursement is empty', value: values[reimbIdx] || '' });
+      rowValid = false;
+    } else if (isNaN(reimbNum) || reimbNum <= 0) {
+      errors.push({ row: i, field: 'reimbursement', message: 'Reimbursement must be a positive number', value: values[reimbIdx] });
+      rowValid = false;
+    }
+
+    // Optional warnings
+    if ('drugName' in columnMap) {
+      const dnIdx = columnMap['drugName'];
+      if (!values[dnIdx]) {
+        warnings.push({ row: i, field: 'drugName', message: 'Drug name is empty (optional but recommended)' });
+      }
+    } else {
+      if (i === 1) {
+        warnings.push({ row: 0, field: 'drugName', message: 'No drug name column detected. Consider adding one for better reporting.' });
+      }
+    }
+
+    if (rowValid) validRows++;
+  }
+
+  res.json({
+    valid: errors.length === 0,
+    totalRows,
+    validRows,
+    errors,
+    warnings,
+    columnMapping: { detected, expected, missing },
+  });
+});
+
+// ---- Dashboard Metrics ----
+app.get('/api/metrics', (_req, res) => {
+  const avgUnderpayment = metricsStore.totalUnderpaid > 0
+    ? +(metricsStore.totalRecoveryAmount / metricsStore.totalUnderpaid).toFixed(2)
+    : 0;
+
+  const topUnderpaidDrugs = Object.entries(metricsStore.drugUnderpayments)
+    .map(([ndc, data]) => ({
+      ndc,
+      drugName: data.drugName,
+      totalUnderpayment: +data.totalAmount.toFixed(2),
+      claimCount: data.count,
+    }))
+    .sort((a, b) => b.totalUnderpayment - a.totalUnderpayment)
+    .slice(0, 10);
+
+  const underpaymentByPayer: Record<string, { totalAmount: number; count: number }> = {};
+  for (const [payer, data] of Object.entries(metricsStore.payerUnderpayments)) {
+    underpaymentByPayer[payer] = {
+      totalAmount: +data.totalAmount.toFixed(2),
+      count: data.count,
+    };
+  }
+
+  res.json({
+    summary: {
+      totalClaimsAnalyzed: metricsStore.totalClaimsAnalyzed,
+      totalUnderpaid: metricsStore.totalUnderpaid,
+      totalRecoveryAmount: +metricsStore.totalRecoveryAmount.toFixed(2),
+      averageUnderpayment: avgUnderpayment,
+      appealsGenerated: metricsStore.appealsGenerated,
+    },
+    topUnderpaidDrugs,
+    underpaymentByPayer,
+    nadacDatabaseSize: Object.keys(NADAC_DATABASE).length,
+    lastUpdated: metricsStore.lastUpdated,
+  });
+});
+
 // Serve static files in production
 if (process.env.NODE_ENV === 'production') {
   // In production, dist-server/index.js serves dist/ (sibling directory)
@@ -462,9 +699,13 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`🚀 GetPaidRx API running on port ${PORT}`);
-  console.log(`📊 NADAC database loaded: ${Object.keys(NADAC_DATABASE).length} drug entries`);
-});
+// Only start the server if this file is executed directly (not imported for testing)
+const isDirectRun = process.argv[1]?.includes('index') || process.env.NODE_ENV === 'production';
+if (isDirectRun && !process.env.VITEST) {
+  app.listen(PORT, () => {
+    console.log(`🚀 GetPaidRx API running on port ${PORT}`);
+    console.log(`📊 NADAC database loaded: ${Object.keys(NADAC_DATABASE).length} drug entries`);
+  });
+}
 
 export default app;
