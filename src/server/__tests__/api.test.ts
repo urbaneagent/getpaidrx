@@ -341,6 +341,307 @@ ABC-1234-XX,90,1.50`;
     });
   });
 
+  // ---- CMS Complaint Report Generator ----
+  describe('POST /api/cms-complaint', () => {
+    it('generates a complete CMS complaint report', async () => {
+      const res = await request(app)
+        .post('/api/cms-complaint')
+        .send({
+          claims: [
+            {
+              ndc: '00002-4462-30',
+              quantity: 90,
+              reimbursement: 0.50,
+              underpaymentAmount: 1.58,
+              drugName: 'Metformin HCl 500mg',
+              payerName: 'Test PBM',
+              dateOfService: '2026-01-15',
+            },
+            {
+              ndc: '00071-0155-23',
+              quantity: 30,
+              reimbursement: 0.20,
+              underpaymentAmount: 0.82,
+              drugName: 'Lisinopril 10mg',
+              payerName: 'Test PBM',
+              dateOfService: '2026-01-16',
+            },
+          ],
+          pharmacyInfo: {
+            name: 'Test Pharmacy',
+            npi: '1234567890',
+            ncpdpId: '1234567',
+            address: '123 Main St, Anytown, USA',
+            phone: '555-123-4567',
+            contactName: 'Dr. Smith',
+          },
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty('report');
+      expect(res.body).toHaveProperty('summary');
+      expect(res.body).toHaveProperty('generatedAt');
+      expect(res.body.report).toContain('CMS COMPLAINT REPORT');
+      expect(res.body.report).toContain('Test Pharmacy');
+      expect(res.body.report).toContain('Test PBM');
+      expect(res.body.report).toContain('Consolidated Appropriations Act of 2026');
+      expect(res.body.report).toContain('PBMCompliance@cms.hhs.gov');
+      expect(res.body.summary.totalClaims).toBe(2);
+      expect(res.body.summary.totalUnderpayment).toBe(2.40);
+      expect(res.body.summary.payerBreakdown['Test PBM']).toBeDefined();
+      expect(res.body.summary.payerBreakdown['Test PBM'].count).toBe(2);
+    });
+
+    it('returns 400 when claims array is missing', async () => {
+      const res = await request(app)
+        .post('/api/cms-complaint')
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body).toHaveProperty('error');
+    });
+
+    it('returns 400 when claims array is empty', async () => {
+      const res = await request(app)
+        .post('/api/cms-complaint')
+        .send({ claims: [] });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('uses default pharmacy info when not provided', async () => {
+      const res = await request(app)
+        .post('/api/cms-complaint')
+        .send({
+          claims: [
+            {
+              ndc: '00002-4462-30',
+              quantity: 90,
+              reimbursement: 0.50,
+              underpaymentAmount: 1.58,
+            },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.report).toContain('[Pharmacy Name]');
+      expect(res.body.report).toContain('[NPI Number]');
+    });
+  });
+
+  // ---- Underpayment Detection Logic Tests ----
+  describe('Underpayment Detection Logic', () => {
+    it('correctly identifies underpayment when reimbursement is 20% below NADAC', async () => {
+      const res = await request(app)
+        .post('/api/analyze')
+        .send({
+          claims: [
+            {
+              ndc: '00002-4462-30', // Metformin, NADAC $0.0231
+              quantity: 100,
+              reimbursement: 1.50, // Expected $2.31, actual $1.50 = 35% below
+            },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.claims[0].isUnderpaid).toBe(true);
+      expect(res.body.claims[0].expectedReimbursement).toBe(2.31);
+      expect(res.body.claims[0].underpaymentAmount).toBeGreaterThan(0);
+    });
+
+    it('does not flag underpayment when within 10% of NADAC', async () => {
+      const res = await request(app)
+        .post('/api/analyze')
+        .send({
+          claims: [
+            {
+              ndc: '00002-4462-30', // Metformin, NADAC $0.0231
+              quantity: 100,
+              reimbursement: 2.20, // Expected $2.31, actual $2.20 = 5% below
+            },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.claims[0].isUnderpaid).toBe(false);
+      expect(res.body.claims[0].underpaymentAmount).toBe(0);
+    });
+
+    it('correctly calculates underpayment amount', async () => {
+      const res = await request(app)
+        .post('/api/analyze')
+        .send({
+          claims: [
+            {
+              ndc: '00071-0155-23', // Lisinopril, NADAC $0.0341
+              quantity: 30,
+              reimbursement: 0.50, // Expected $1.02, actual $0.50 = underpayment $0.52
+            },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.claims[0].isUnderpaid).toBe(true);
+      expect(res.body.claims[0].expectedReimbursement).toBe(1.02);
+      expect(res.body.claims[0].underpaymentAmount).toBe(0.52);
+    });
+
+    it('handles multiple claims with mixed underpayment status', async () => {
+      const res = await request(app)
+        .post('/api/analyze')
+        .send({
+          claims: [
+            { ndc: '00002-4462-30', quantity: 90, reimbursement: 0.50 }, // Underpaid
+            { ndc: '00071-0155-23', quantity: 30, reimbursement: 1.00 }, // Fair
+            { ndc: '00093-7180-01', quantity: 60, reimbursement: 1.00 }, // Underpaid
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalClaims).toBe(3);
+      expect(res.body.underpaidCount).toBe(2);
+      expect(res.body.totalUnderpayment).toBeGreaterThan(0);
+    });
+
+    it('updates metrics after analyzing claims', async () => {
+      const before = await request(app).get('/api/metrics');
+
+      await request(app)
+        .post('/api/analyze')
+        .send({
+          claims: [
+            { ndc: '00002-4462-30', quantity: 90, reimbursement: 0.50, payerName: 'UnitedHealthcare' },
+          ],
+        });
+
+      const after = await request(app).get('/api/metrics');
+      expect(after.body.summary.totalClaimsAnalyzed).toBeGreaterThan(before.body.summary.totalClaimsAnalyzed);
+    });
+  });
+
+  // ---- NADAC API Integration Tests ----
+  describe('NADAC API Integration', () => {
+    it('returns correct NADAC data for known NDC', async () => {
+      const res = await request(app).get('/api/nadac?ndc=00002-4462-30');
+
+      expect(res.status).toBe(200);
+      expect(res.body.nadacPerUnit).toBe(0.0231);
+      expect(res.body.drugName).toBe('Metformin HCl 500mg');
+      expect(res.body.unitType).toBe('TAB');
+    });
+
+    it('returns all NADAC database entries', async () => {
+      const res = await request(app).get('/api/nadac');
+
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBeGreaterThan(0);
+      expect(Array.isArray(res.body.drugs)).toBe(true);
+    });
+
+    it('performs NADAC rate check correctly', async () => {
+      const res = await request(app)
+        .post('/api/nadac/check')
+        .send({
+          ndc: '00002-4462-30',
+          quantity: 90,
+          reimbursement: 1.50,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty('nadacPerUnit');
+      expect(res.body).toHaveProperty('expectedReimbursement');
+      expect(res.body).toHaveProperty('actualReimbursement');
+      expect(res.body).toHaveProperty('difference');
+      expect(res.body).toHaveProperty('isUnderpaid');
+      expect(res.body).toHaveProperty('underpaymentPercent');
+    });
+
+    it('returns 404 for NADAC check with unknown NDC in local fallback', async () => {
+      const res = await request(app)
+        .post('/api/nadac/check')
+        .send({
+          ndc: '99999-9999-99',
+          quantity: 30,
+          reimbursement: 10.00,
+        });
+
+      // Should fall back to local DB and return 404
+      expect(res.status === 404 || res.status === 502).toBe(true);
+    });
+
+    it('validates NADAC check requires all fields', async () => {
+      const res = await request(app)
+        .post('/api/nadac/check')
+        .send({
+          ndc: '00002-4462-30',
+          // Missing quantity and reimbursement
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toHaveProperty('error');
+    });
+  });
+
+  // ---- Enhanced CSV Validation Tests ----
+  describe('Enhanced CSV Validation', () => {
+    it('provides helpful suggestions for missing columns', async () => {
+      const res = await request(app)
+        .post('/api/validate-csv')
+        .send({ csv: 'drug,amount\nMetformin,5.00' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.valid).toBe(false);
+      expect(res.body.errors[0]).toHaveProperty('suggestion');
+      expect(res.body.columnMapping).toHaveProperty('example');
+      expect(res.body.columnMapping).toHaveProperty('yourHeaders');
+    });
+
+    it('provides helpful suggestions for invalid NDC format', async () => {
+      const res = await request(app)
+        .post('/api/validate-csv')
+        .send({
+          csv: `ndc,quantity,reimbursement
+INVALID,90,1.50`
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.valid).toBe(false);
+      expect(res.body.errors[0].field).toBe('ndc');
+      expect(res.body.errors[0]).toHaveProperty('suggestion');
+      expect(res.body.errors[0].suggestion).toContain('INVALID');
+    });
+
+    it('provides helpful suggestions for invalid quantity', async () => {
+      const res = await request(app)
+        .post('/api/validate-csv')
+        .send({
+          csv: `ndc,quantity,reimbursement
+00002-4462-30,ABC,1.50`
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.valid).toBe(false);
+      expect(res.body.errors[0].field).toBe('quantity');
+      expect(res.body.errors[0]).toHaveProperty('suggestion');
+      expect(res.body.errors[0].message).toContain('ABC');
+    });
+
+    it('provides helpful suggestions for invalid reimbursement', async () => {
+      const res = await request(app)
+        .post('/api/validate-csv')
+        .send({
+          csv: `ndc,quantity,reimbursement
+00002-4462-30,90,NOT_A_NUMBER`
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.valid).toBe(false);
+      expect(res.body.errors[0].field).toBe('reimbursement');
+      expect(res.body.errors[0]).toHaveProperty('suggestion');
+    });
+  });
+
   // ---- Export ----
   describe('App export', () => {
     it('exports a default app that is defined', () => {
