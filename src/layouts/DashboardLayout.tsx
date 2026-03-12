@@ -12,6 +12,8 @@ import {
   X,
   Pill,
   ChevronRight,
+  TrendingUp,
+  AlertTriangle,
 } from 'lucide-react';
 
 const navItems = [
@@ -19,6 +21,8 @@ const navItems = [
   { to: '/dashboard/upload', icon: Upload, label: 'Upload Claims' },
   { to: '/dashboard/results', icon: BarChart3, label: 'Results' },
   { to: '/dashboard/compare', icon: Search, label: 'Compare Prices' },
+  { to: '/dashboard/margins', icon: TrendingUp, label: 'Margin Optimizer' },
+  { to: '/dashboard/shortages', icon: AlertTriangle, label: 'Shortage Tracker' },
   { to: '/dashboard/settings', icon: Settings, label: 'Settings' },
 ];
 

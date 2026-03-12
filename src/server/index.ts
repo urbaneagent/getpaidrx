@@ -2,6 +2,11 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import pool from './db.js';
+import { initDb } from './db-init.js';
+import { requireAuth, optionalAuth, JWT_SECRET } from './middleware/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -82,6 +87,166 @@ const metricsStore: MetricsState = {
 // Health check
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: '0.1.0', timestamp: new Date().toISOString() });
+});
+
+// ---- Auth Endpoints ----
+
+// POST /api/auth/signup
+app.post('/api/auth/signup', async (req, res) => {
+  const { email, password, name, pharmacyName } = req.body;
+
+  if (!email || !password || !name) {
+    res.status(400).json({ error: 'email, password, and name are required' });
+    return;
+  }
+  if (password.length < 8) {
+    res.status(400).json({ error: 'Password must be at least 8 characters' });
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({ error: 'Database not configured' });
+    return;
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 12);
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, name, pharmacy_name)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, email, name, pharmacy_name, plan, claims_used, comparisons_used`,
+      [email.toLowerCase().trim(), passwordHash, name, pharmacyName || null]
+    );
+    const user = result.rows[0];
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        pharmacyName: user.pharmacy_name,
+        plan: user.plan,
+        claimsUsed: user.claims_used,
+        comparisonsUsed: user.comparisons_used,
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    res.status(201).json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        pharmacyName: user.pharmacy_name,
+        plan: user.plan,
+        claimsUsed: user.claims_used,
+        comparisonsUsed: user.comparisons_used,
+      },
+    });
+  } catch (err: any) {
+    if (err.code === '23505') {
+      res.status(409).json({ error: 'An account with that email already exists' });
+    } else {
+      console.error('Signup error:', err);
+      res.status(500).json({ error: 'Failed to create account' });
+    }
+  }
+});
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    res.status(400).json({ error: 'email and password are required' });
+    return;
+  }
+
+  if (!pool) {
+    res.status(503).json({ error: 'Database not configured' });
+    return;
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT id, email, name, pharmacy_name, plan, claims_used, comparisons_used, password_hash
+       FROM users WHERE email = $1`,
+      [email.toLowerCase().trim()]
+    );
+    const user = result.rows[0];
+    if (!user) {
+      res.status(401).json({ error: 'Invalid email or password' });
+      return;
+    }
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      res.status(401).json({ error: 'Invalid email or password' });
+      return;
+    }
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        pharmacyName: user.pharmacy_name,
+        plan: user.plan,
+        claimsUsed: user.claims_used,
+        comparisonsUsed: user.comparisons_used,
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        pharmacyName: user.pharmacy_name,
+        plan: user.plan,
+        claimsUsed: user.claims_used,
+        comparisonsUsed: user.comparisons_used,
+      },
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// GET /api/auth/me
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  if (!pool) {
+    // Return from JWT payload directly (no DB to refresh from)
+    res.json({ user: req.user });
+    return;
+  }
+  try {
+    const result = await pool.query(
+      `SELECT id, email, name, pharmacy_name, plan, claims_used, comparisons_used
+       FROM users WHERE id = $1`,
+      [req.user!.id]
+    );
+    const user = result.rows[0];
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        pharmacyName: user.pharmacy_name,
+        plan: user.plan,
+        claimsUsed: user.claims_used,
+        comparisonsUsed: user.comparisons_used,
+      },
+    });
+  } catch (err) {
+    console.error('Me error:', err);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
 });
 
 // Get NADAC data (all or by NDC)

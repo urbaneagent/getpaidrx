@@ -10,6 +10,8 @@ import UploadClaims from './pages/dashboard/UploadClaims';
 import ResultsPage from './pages/dashboard/ResultsPage';
 import ComparePrices from './pages/dashboard/ComparePrices';
 import SettingsPage from './pages/dashboard/SettingsPage';
+import MarginOptimizer from './pages/dashboard/MarginOptimizer';
+import ShortageTracker from './pages/dashboard/ShortageTracker';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -44,6 +46,8 @@ function AppRoutes() {
         <Route path="upload" element={<UploadClaims />} />
         <Route path="results" element={<ResultsPage />} />
         <Route path="compare" element={<ComparePrices />} />
+        <Route path="margins" element={<MarginOptimizer />} />
+        <Route path="shortages" element={<ShortageTracker />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

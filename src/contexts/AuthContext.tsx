@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
 interface User {
   id: string;
   email: string;
@@ -17,83 +19,113 @@ interface AuthContextType {
   signup: (email: string, password: string, name: string, pharmacyName?: string) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
+  getToken: () => string | null;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
+
+function getStoredToken(): string | null {
+  return localStorage.getItem('getpaidrx_token');
+}
+
+function setStoredToken(token: string): void {
+  localStorage.setItem('getpaidrx_token', token);
+}
+
+function clearStoredToken(): void {
+  localStorage.removeItem('getpaidrx_token');
+}
+
+async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const token = getStoredToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> || {}),
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return fetch(`${API_BASE}${path}`, { ...options, headers });
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // On mount, check for existing token and validate it
   useEffect(() => {
-    // Check localStorage for existing session
-    const stored = localStorage.getItem('getpaidrx_user');
-    if (stored) {
-      try {
-        setUser(JSON.parse(stored));
-      } catch {
-        localStorage.removeItem('getpaidrx_user');
-      }
-    }
-    setIsLoading(false);
-  }, []);
-
-  const login = useCallback(async (email: string, _password: string) => {
-    // For MVP: simple local auth. Replace with real backend auth later.
-    setIsLoading(true);
-    await new Promise(r => setTimeout(r, 500)); // Simulate API call
-    
-    const existingUsers = JSON.parse(localStorage.getItem('getpaidrx_users') || '{}');
-    const existingUser = existingUsers[email];
-    
-    if (!existingUser) {
+    const token = getStoredToken();
+    if (!token) {
       setIsLoading(false);
-      throw new Error('No account found with that email. Please sign up first.');
+      return;
     }
 
-    const newUser: User = {
-      id: existingUser.id,
-      email,
-      name: existingUser.name,
-      pharmacyName: existingUser.pharmacyName,
-      plan: existingUser.plan || 'free',
-      claimsUsed: existingUser.claimsUsed || 0,
-      comparisonsUsed: existingUser.comparisonsUsed || 0,
-    };
-    
-    setUser(newUser);
-    localStorage.setItem('getpaidrx_user', JSON.stringify(newUser));
-    setIsLoading(false);
+    apiFetch('/api/auth/me')
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json();
+          setUser(data.user);
+        } else {
+          // Token expired or invalid
+          clearStoredToken();
+        }
+      })
+      .catch(() => {
+        clearStoredToken();
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
   }, []);
 
-  const signup = useCallback(async (email: string, _password: string, name: string, pharmacyName?: string) => {
+  const login = useCallback(async (email: string, password: string) => {
     setIsLoading(true);
-    await new Promise(r => setTimeout(r, 500));
-    
-    const newUser: User = {
-      id: crypto.randomUUID(),
-      email,
-      name,
-      pharmacyName,
-      plan: 'free',
-      claimsUsed: 0,
-      comparisonsUsed: 0,
-    };
-    
-    // Store in "database"
-    const existingUsers = JSON.parse(localStorage.getItem('getpaidrx_users') || '{}');
-    existingUsers[email] = newUser;
-    localStorage.setItem('getpaidrx_users', JSON.stringify(existingUsers));
-    
-    setUser(newUser);
-    localStorage.setItem('getpaidrx_user', JSON.stringify(newUser));
-    setIsLoading(false);
+    try {
+      const res = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Login failed');
+      }
+
+      setStoredToken(data.token);
+      setUser(data.user);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const signup = useCallback(async (email: string, password: string, name: string, pharmacyName?: string) => {
+    setIsLoading(true);
+    try {
+      const res = await apiFetch('/api/auth/signup', {
+        method: 'POST',
+        body: JSON.stringify({ email, password, name, pharmacyName }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Signup failed');
+      }
+
+      setStoredToken(data.token);
+      setUser(data.user);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
   const logout = useCallback(() => {
     setUser(null);
-    localStorage.removeItem('getpaidrx_user');
+    clearStoredToken();
   }, []);
+
+  const getToken = useCallback(() => getStoredToken(), []);
 
   return (
     <AuthContext.Provider value={{
@@ -103,6 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signup,
       logout,
       isAuthenticated: !!user,
+      getToken,
     }}>
       {children}
     </AuthContext.Provider>
