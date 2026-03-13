@@ -9,9 +9,11 @@ services:
     name: getpaidrx
     runtime: node
     region: ohio
-    plan: starter
+    plan: pro
     buildCommand: npm install && npm run build
     startCommand: node dist-server/index.js
+    healthCheckPath: /api/health
+    numInstances: 2
     envVars:
       - key: NODE_ENV
         value: production

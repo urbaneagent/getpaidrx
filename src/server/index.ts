@@ -1085,6 +1085,26 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
+// Health check endpoint
+app.get('/api/health', async (_req, res) => {
+  try {
+    // Test database connection
+    await pool.query('SELECT 1');
+    res.json({ 
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version || '1.0.0',
+      uptime: process.uptime()
+    });
+  } catch (error) {
+    res.status(503).json({ 
+      status: 'unhealthy',
+      error: 'Database connection failed',
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 // Only start the server if this file is executed directly (not imported for testing)
 const isDirectRun = process.argv[1]?.includes('index') || process.env.NODE_ENV === 'production';
 if (isDirectRun && !process.env.VITEST) {
